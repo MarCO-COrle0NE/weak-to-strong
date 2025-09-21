@@ -1,0 +1,281 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+
+import argparse
+import collections
+import json
+import os
+import random
+import sys
+import time
+import uuid
+import csv
+
+import numpy as np
+import PIL
+import torch
+import torchvision
+import torch.utils.data
+
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, confusion_matrix
+from scipy.optimize import linear_sum_assignment
+
+from domainbed import datasets
+from domainbed import hparams_registry
+from domainbed import algorithms
+from domainbed.lib import misc
+from domainbed.lib.fast_data_loader import InfiniteDataLoader, FastDataLoader
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Domain generalization')
+    parser.add_argument('--data_dir', type=str)
+    parser.add_argument('--checkpoint', type=str)
+    parser.add_argument('--checkpoint_name', type=str, default='model.pkl')
+    parser.add_argument('--dataset', type=str, default="RotatedMNIST")
+    parser.add_argument('--algorithm', type=str, default="ERM")
+    parser.add_argument('--task', type=str, default="domain_generalization",
+        choices=["domain_generalization", "domain_adaptation"])
+    parser.add_argument('--hparams', type=str,
+        help='JSON-serialized hparams dict')
+    parser.add_argument('--hparams_seed', type=int, default=0,
+        help='Seed for random hparams (0 means "default hparams")')
+    parser.add_argument('--trial_seed', type=int, default=0,
+        help='Trial number (used for seeding split_dataset and '
+        'random_hparams).')
+    parser.add_argument('--seed', type=int, default=0,
+        help='Seed for everything else')
+    parser.add_argument('--steps', type=int, default=None,
+        help='Number of steps. Default is dataset-dependent.')
+    parser.add_argument('--checkpoint_freq', type=int, default=None,
+        help='Checkpoint every N steps. Default is dataset-dependent.')
+    parser.add_argument('--test_envs', type=int, nargs='+', default=[0])
+    parser.add_argument('--output_dir', type=str, default="train_output")
+    parser.add_argument('--holdout_fraction', type=float, default=0.2)
+    parser.add_argument('--uda_holdout_fraction', type=float, default=0,
+        help="For domain adaptation, % of test to use unlabeled for training.")
+    parser.add_argument('--classifier', action='store_true')
+    parser.add_argument('--skip_model_save', action='store_true')
+    parser.add_argument('--save_model_every_checkpoint', action='store_true')
+    args = parser.parse_args()
+
+    # If we ever want to implement checkpointing, just persist these values
+    # every once in a while, and then load them from disk here.
+    start_step = 0
+    algorithm_dict = None
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    sys.stdout = misc.Tee(os.path.join(args.output_dir, 'out.txt'))
+    sys.stderr = misc.Tee(os.path.join(args.output_dir, 'err.txt'))
+
+    print("Environment:")
+    print("\tPython: {}".format(sys.version.split(" ")[0]))
+    print("\tPyTorch: {}".format(torch.__version__))
+    print("\tTorchvision: {}".format(torchvision.__version__))
+    print("\tCUDA: {}".format(torch.version.cuda))
+    print("\tCUDNN: {}".format(torch.backends.cudnn.version()))
+    print("\tNumPy: {}".format(np.__version__))
+    print("\tPIL: {}".format(PIL.__version__))
+
+    print('Args:')
+    for k, v in sorted(vars(args).items()):
+        print('\t{}: {}'.format(k, v))
+
+    if args.hparams_seed == 0:
+        hparams = hparams_registry.default_hparams(args.algorithm, args.dataset)
+    else:
+        hparams = hparams_registry.random_hparams(args.algorithm, args.dataset,
+            misc.seed_hash(args.hparams_seed, args.trial_seed))
+    if args.hparams:
+        hparams.update(json.loads(args.hparams))
+
+    hparams['index_dataset'] = True
+
+    print('HParams:')
+    for k, v in sorted(hparams.items()):
+        print('\t{}: {}'.format(k, v))
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    if args.dataset in vars(datasets):
+        dataset = vars(datasets)[args.dataset](args.data_dir,
+            args.test_envs, hparams)
+    else:
+        raise NotImplementedError
+
+    # Split each env into an 'in-split' and an 'out-split'. We'll train on
+    # each in-split except the test envs, and evaluate on all splits.
+
+    # To allow unsupervised domain adaptation experiments, we split each test
+    # env into 'in-split', 'uda-split' and 'out-split'. The 'in-split' is used
+    # by collect_results.py to compute classification accuracies.  The
+    # 'out-split' is used by the Oracle model selectino method. The unlabeled
+    # samples in 'uda-split' are passed to the algorithm at training time if
+    # args.task == "domain_adaptation". If we are interested in comparing
+    # domain generalization and domain adaptation results, then domain
+    # generalization algorithms should create the same 'uda-splits', which will
+    # be discared at training.
+    in_splits = []
+    out_splits = []
+    uda_splits = []
+    env_i = args.test_envs[0]
+    env = dataset[env_i]
+    uda = []
+
+    out, in_ = misc.split_dataset(env,
+            int(len(env)*args.holdout_fraction),
+            misc.seed_hash(args.trial_seed, env_i))
+
+    if hparams['class_balanced']:
+            in_weights = misc.make_weights_for_balanced_classes(in_)
+            out_weights = misc.make_weights_for_balanced_classes(out)
+            if uda is not None:
+                uda_weights = misc.make_weights_for_balanced_classes(uda)
+    else:
+            in_weights, out_weights, uda_weights = None, None, None
+    in_splits.append((in_, in_weights))
+    out_splits.append((out, out_weights))
+    if len(uda):
+            uda_splits.append((uda, uda_weights))
+
+    if args.task == "domain_adaptation" and len(uda_splits) == 0:
+        raise ValueError("Not enough unlabeled samples for domain adaptation.")
+
+    # train_loaders = [InfiniteDataLoader(
+    #     dataset=env,
+    #     weights=env_weights,
+    #     batch_size=hparams['batch_size'],
+    #     num_workers=dataset.N_WORKERS)
+    #     for i, (env, env_weights) in enumerate(in_splits)
+    #     if i not in args.test_envs]
+    
+    train_loaders = []
+
+    uda_loaders = [torch.utils.data.DataLoader(
+        dataset=env,
+        batch_size=hparams['batch_size'],
+        num_workers=dataset.N_WORKERS)
+        for i, (env, env_weights) in enumerate(uda_splits)]
+
+    eval_loaders = [torch.utils.data.DataLoader(
+        dataset=env,
+        batch_size=64,
+        num_workers=dataset.N_WORKERS, shuffle=False)]
+    eval_weights = [None for _, weights in (in_splits + out_splits + uda_splits)]
+    eval_loader_names = ['env{}_in'.format(i)
+        for i in range(len(in_splits))]
+    eval_loader_names += ['env{}_out'.format(i)
+        for i in range(len(out_splits))]
+    eval_loader_names += ['env{}_uda'.format(i)
+        for i in range(len(uda_splits))]
+
+    algorithm_class = algorithms.get_algorithm_class(args.algorithm)
+    algorithm = algorithm_class(dataset.input_shape, dataset.num_classes,
+        len(dataset) - len(args.test_envs), hparams)
+    
+    if args.checkpoint:
+        state_dict = torch.load(args.checkpoint+'/'+args.checkpoint_name)
+        algorithm_dict = state_dict['model_dict']
+
+    if algorithm_dict is not None:
+        algorithm.load_state_dict(algorithm_dict)
+
+    algorithm.to(device)
+
+    #train_minibatches_iterator = zip(*train_loaders)
+    train_minibatches_iterator = None
+    uda_minibatches_iterator = zip(*uda_loaders)
+    checkpoint_vals = collections.defaultdict(lambda: [])
+
+    steps_per_epoch = min([len(env)/hparams['batch_size'] for env,_ in in_splits])
+
+    algorithm.eval()
+    if True:
+        features = []
+        preds = []
+        true_labels = []
+        for i, (x,y,indices) in enumerate(eval_loaders[0]):
+            x = x.to(device)
+            with torch.no_grad():
+                feat,predicted = algorithm.predict(x,get_pool=True)
+            # features.append(feat.cpu())
+            # preds.append(predicted.cpu())
+            features.append(feat)
+            preds.append(predicted)
+            true_labels.append(y)
+
+        # features_np = torch.cat(features, dim=0).numpy()
+        # preds_np = torch.cat(preds, dim=0).numpy()
+        # true_labels_np = torch.cat(true_labels, dim=0).numpy()
+        features_np = torch.cat(features, dim=0)
+        preds_np = torch.cat(preds, dim=0)
+        true_labels_np = torch.cat(true_labels, dim=0)
+
+        features_denom = torch.matmul(features_np,torch.transpose(features_np,0,1))
+
+        # Initialize numerator and denominator
+        numerator = 0.0
+        denominator = 2*features_denom.sum().item()
+
+        K = dataset.num_classes
+
+        for class_k in range(K):
+            # Get indices of samples in class k
+            X_k_indices = (true_labels_np == class_k).nonzero(as_tuple=True)[0]
+            # Get indices of samples not in class k
+            X_not_k_indices = (true_labels_np != class_k).nonzero(as_tuple=True)[0]
+            
+            f_x = features_np[X_k_indices]
+            f_x_prime = features_np[X_not_k_indices]
+            numerator += torch.matmul(f_x,torch.transpose(f_x_prime,0,1)).sum().item()
+
+        alpha_feat = numerator/denominator
+        print('Alpha features: ', alpha_feat)
+
+        preds_denom = torch.matmul(preds_np,torch.transpose(preds_np,0,1))
+
+        # Initialize numerator and denominator
+        numerator = 0.0
+        denominator = 2*preds_denom.sum().item()
+
+        K = dataset.num_classes
+
+        for class_k in range(K):
+            # Get indices of samples in class k
+            X_k_indices = (true_labels_np == class_k).nonzero(as_tuple=True)[0]
+            # Get indices of samples not in class k
+            X_not_k_indices = (true_labels_np != class_k).nonzero(as_tuple=True)[0]
+            
+            f_x = preds_np[X_k_indices]
+            f_x_prime = preds_np[X_not_k_indices]
+            numerator += torch.matmul(f_x,torch.transpose(f_x_prime,0,1)).sum().item()
+
+        alpha_pred = numerator/denominator
+        print('Alpha Preds: ', alpha_pred)
+
+
+        # kmeans = KMeans(n_clusters=dataset.num_classes)
+        # predicted_clusters = kmeans.fit_predict(features_np)
+
+        # error = clustering_error(predicted_clusters,true_labels_np)
+        # print('Clustering Error: '+str(error))
+
+        # # Evaluate ARI and NMI
+        # ari = adjusted_rand_score(true_labels_np, predicted_clusters)
+        # print('ARI: '+str(ari))
+
+        # nmi = normalized_mutual_info_score(true_labels_np, predicted_clusters)
+        # print('NMI: '+str(nmi))
+
+        with open(os.path.join(args.output_dir, 'done'), 'w') as f:
+            f.write('done')
