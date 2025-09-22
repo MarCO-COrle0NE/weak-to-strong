@@ -9,3 +9,10 @@ We build upon or make use of the following existing repositories:
 
 - [EleutherAI / w2s](https://github.com/EleutherAI/w2s) — This project (“Weak-to-Strong Generalization”) provided code and experimental setups that informed our experiments on NLP tasks. :contentReference[oaicite:0]{index=0}  
 - [facebookresearch / DomainBed](https://github.com/facebookresearch/DomainBed) — A suite for benchmarking domain generalization algorithms. We used their code for visual tasks in the initial stage of our work. :contentReference[oaicite:1]{index=1}
+
+## Authors
+Yijun Dong
+Yicheng Li
+Yunai Li
+Jason D. Lee
+Qi Lei
