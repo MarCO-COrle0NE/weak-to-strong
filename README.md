@@ -8,11 +8,11 @@ The domainbed folder contains code modified from [facebookresearch / DomainBed](
 Some Results
 ![ColoredMNIST](fig/coloredmnist_lp/coloredmnist_dsw.png)
 
-[ColoredMNIST2](fig/coloredmnist_lp/coloredmnist_var.pdf)
+[ColoredMNIST2](fig/coloredmnist_lp/coloredmnist_var.png)
 
-[SST](fig/sst2/sst2-dsw.pdf)
+[SST](fig/sst2/sst2-dsw.png)
 
-[SST](fig/sst2/sst2-var.pdf)
+[SST](fig/sst2/sst2-var.png)
 
 ![Extrapolation](fig/extrapolation.png)
 
