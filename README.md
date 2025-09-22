@@ -11,8 +11,8 @@ We build upon or make use of the following existing repositories:
 - [facebookresearch / DomainBed](https://github.com/facebookresearch/DomainBed) — A suite for benchmarking domain generalization algorithms. We used their code for visual tasks in the initial stage of our work. :contentReference[oaicite:1]{index=1}
 
 ## Authors
-Yijun Dong
-Yicheng Li
-Yunai Li
-Jason D. Lee
+Yijun Dong,
+Yicheng Li,
+Yunai Li,
+Jason D. Lee,
 Qi Lei
