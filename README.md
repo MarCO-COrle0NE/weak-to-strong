@@ -5,6 +5,10 @@ This repository contains code for Discrepancies are Virtue: Weak-to-Strong Gener
 The w2s folder contains scripts used for experiments on NLP tasks and follows the setup of [EleutherAI / w2s](https://github.com/EleutherAI/w2s).
 The domainbed folder contains code modified from [facebookresearch / DomainBed](https://github.com/facebookresearch/DomainBed) to experiment on CV tasks. Code for evaluating intrinsic dimension and correlation dimension is also included in this folder.
 
+Results
+![My Plot](asset/plot.png)
+
+
 We build upon or make use of the following existing repositories:
 
 - [EleutherAI / w2s](https://github.com/EleutherAI/w2s) — This project (“Weak-to-Strong Generalization”) provided code and experimental setups that informed our experiments on NLP tasks. :contentReference[oaicite:0]{index=0}  
