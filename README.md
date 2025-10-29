@@ -1,6 +1,6 @@
 # weak-to-strong
 
-This repository contains code for Discrepancies are Virtue: Weak-to-Strong Generalization through Lens of Intrinsic Dimension. 
+This repository contains code for [Discrepancies are Virtue: Weak-to-Strong Generalization through Lens of Intrinsic Dimension](https://arxiv.org/abs/2502.05075). 
 
 The w2s folder contains scripts used for experiments on NLP tasks and follows the setup of [EleutherAI / w2s](https://github.com/EleutherAI/w2s).
 The domainbed folder contains code modified from [facebookresearch / DomainBed](https://github.com/facebookresearch/DomainBed) to experiment on CV tasks. Code for evaluating intrinsic dimension and correlation dimension is also included in this folder.
